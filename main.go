@@ -17,18 +17,16 @@ var ext = g.NewExt(g.ExtInfo{
 	Title:       "easydice",
 	Description: "An extension to roll/reset dice for you.",
 	Author:      "chirp24",
-	Version:     "1.9",
+	Version:     "1.3",
 })
 
 var (
-	setup            bool
-	setupMutex       sync.Mutex
-	throwChannel     chan *g.Packet
-	diceOffChannel   chan *g.Packet
-	diceThrowPackets []*g.Packet // Store THROW_DICE packets during setup
-	diceOffPackets   []*g.Packet // Store DICE_OFF packets during setup
-	diceValues       map[int]int // Store dice values after rolling
-	closingDice      bool        // Flag to indicate dice are being closed
+	setup          bool
+	setupMutex     sync.Mutex
+	diceIDs        []int
+	diceValues     map[int]int
+	throwChannel   chan *g.Packet
+	diceOffChannel chan *g.Packet
 )
 
 func main() {
@@ -69,9 +67,8 @@ func handleChat(e *g.Intercept) {
 		log.Println(msg)
 		setupMutex.Lock()
 		setup = false
-		closingDice = true // Set closingDice flag
 		setupMutex.Unlock()
-		go closeDice() // Run closeDice asynchronously
+		go closeDice()
 	} else if strings.Contains(msg, ":setup") { // :setup msg
 		e.Block()
 		log.Println(msg)
@@ -83,16 +80,15 @@ func handleChat(e *g.Intercept) {
 	} else if strings.Contains(msg, ":roll") { // :roll msg
 		e.Block()
 		log.Println(msg)
-		go rollDice() // Run rollDice asynchronously
+		go rollDice()
 	}
 }
 
 func resetPackets() {
 	setupMutex.Lock()
 	defer setupMutex.Unlock()
-	diceThrowPackets = nil         // Reset THROW_DICE packets
-	diceOffPackets = nil           // Reset DICE_OFF packets
-	diceValues = make(map[int]int) // Reset dice values
+	diceIDs = nil
+	diceValues = make(map[int]int)
 	log.Println("All saved packets reset")
 }
 
@@ -115,9 +111,15 @@ func handleDiceOff(e *g.Intercept) {
 func handleThrowDiceSetup() {
 	for packet := range throwChannel {
 		setupMutex.Lock()
-		if setup {
-			diceThrowPackets = append(diceThrowPackets, packet.Copy()) // Store the entire packet
-			log.Printf("Stored THROW_DICE packet: %s\n", packet.Data)
+		if len(diceIDs) < 5 {
+			packetString := string(packet.Data)
+			diceID, err := strconv.Atoi(packetString)
+			if err != nil {
+				log.Printf("Error parsing dice ID: %v\n", err)
+			} else {
+				diceIDs = append(diceIDs, diceID)
+				log.Printf("Dice ID captured: %d\n", diceID)
+			}
 		}
 		setupMutex.Unlock()
 	}
@@ -126,10 +128,15 @@ func handleThrowDiceSetup() {
 
 func handleDiceOffSetup() {
 	for packet := range diceOffChannel {
+		// Process dice off packets if needed
 		setupMutex.Lock()
-		if setup {
-			diceOffPackets = append(diceOffPackets, packet.Copy()) // Store the entire packet
-			log.Printf("Stored DICE_OFF packet: %s\n", packet.Data)
+		packetString := string(packet.Data)
+		diceID, err := strconv.Atoi(packetString)
+		if err != nil {
+			log.Printf("Error parsing dice ID: %v\n", err)
+		} else {
+			diceIDs = append(diceIDs, diceID)
+			log.Printf("Dice ID captured: %d\n", diceID)
 		}
 		setupMutex.Unlock()
 	}
@@ -140,57 +147,48 @@ func closeDice() {
 	setupMutex.Lock()
 	defer setupMutex.Unlock()
 
-	// Send each stored DICE_OFF packet in sequence with a delay
-	for _, packet := range diceOffPackets {
-		log.Printf("Sending DICE_OFF packet: %s\n", packet.Data)
-		ext.SendPacket(packet)
-		time.Sleep(500 * time.Millisecond) // Add delay
+	done := make(chan struct{})
+
+	for _, id := range diceIDs {
+		go func(diceID int) {
+			packet := fmt.Sprintf("%d", diceID) // Construct dice off packet
+			ext.Send(out.DICE_OFF, []byte(packet))      // Send the packet
+			log.Printf("Sent dice close packet for ID: %d\n", diceID)
+			done <- struct{}{}
+		}(id)
+
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	log.Println("Closing dice")
+	for range diceIDs {
+		<-done
+	}
+
+	log.Println("All dice close packets sent")
 }
 
 func rollDice() {
 	setupMutex.Lock()
 	defer setupMutex.Unlock()
 
-	// Send each stored THROW_DICE packet in sequence with a delay
-	for _, packet := range diceThrowPackets {
-		log.Printf("Sending THROW_DICE packet: %s\n", packet.Data)
-		ext.SendPacket(packet)
-		time.Sleep(500 * time.Millisecond) // Add delay
+	done := make(chan struct{})
+
+	for _, id := range diceIDs {
+		go func(diceID int) {
+			packet := fmt.Sprintf("%d", diceID) // Construct dice roll packet
+			ext.Send(out.THROW_DICE, []byte(packet))    // Send the packet
+			log.Printf("Sent dice roll packet for ID: %d\n", diceID)
+			done <- struct{}{}
+		}(id)
+
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	log.Println("Rolling dice")
-}
-
-func handleDiceResults(e *g.Intercept) {
-	setupMutex.Lock()
-	defer setupMutex.Unlock()
-
-	if setup && !closingDice {
-		return // Ignore if still in setup mode and not closing dice
+	for range diceIDs {
+		<-done
 	}
 
-	diceID, obfuscatedValue, err := parseDiceValuePacket(e.Packet)
-	if err != nil {
-		log.Printf("Error parsing dice value packet: %v\n", err)
-		return
-	}
-
-	// Store the dice value only if it's a valid roll and not closing dice
-	if obfuscatedValue != 0 && !closingDice {
-		diceValues[diceID] = obfuscatedValue - diceID*38
-	}
-
-	// Check if all dice have been rolled and evaluate poker hands if needed
-	if len(diceValues) == len(diceThrowPackets) && !closingDice {
-		message := evaluateDiceValues(diceValues)
-		ext.Send(in.CHAT, 0, message, 0, 34, 0, 0)
-
-		// Reset for next setup or roll
-		resetPackets()
-	}
+	log.Println("All dice roll packets sent")
 }
 
 func parseDiceValuePacket(packet *g.Packet) (int, int, error) {
@@ -213,8 +211,48 @@ func parseDiceValuePacket(packet *g.Packet) (int, int, error) {
 	return diceID, obfuscatedValue, nil
 }
 
+func handleDiceResults(e *g.Intercept) {
+	diceID, obfuscatedValue, err := parseDiceValuePacket(e.Packet)
+	if err != nil {
+		log.Printf("Error parsing dice value packet: %v\n", err)
+		return
+	}
+
+	setupMutex.Lock()
+	defer setupMutex.Unlock()
+
+	// Check if this is the first DICE_VALUE packet with only dice ID
+	if obfuscatedValue == 0 {
+		for i, id := range diceIDs {
+			if diceID == id {
+				diceValues[i] = 0 // Set to 0 or some default value
+				return
+			}
+		}
+	} else {
+		// This is the second DICE_VALUE packet with both dice ID and obfuscated value
+		for i, id := range diceIDs {
+			if diceID == id {
+				diceValues[i] = obfuscatedValue - id*38
+				break
+			}
+		}
+
+		// Check if we have all dice values now
+		if len(diceValues) == 5 {
+			message := evaluateDiceValues(diceValues)
+			ext.Send(in.CHAT, message)     // Sending the result as a chat message
+			diceValues = make(map[int]int) // Reset for next roll
+		}
+	}
+}
+
 func evaluateDiceValues(diceValues map[int]int) string {
-	// Implement logic here to evaluate dice values based on poker rules
+	// Add logic here to evaluate dice values based on poker rules
+	// Example logic:
+	var counts = make(map[int]int)
+	for _, value := range diceValues {
+		counts[value]++
 	}
 
 	// Check for poker hands based on counts

@@ -215,10 +215,6 @@ func parseDiceValuePacket(packet *g.Packet) (int, int, error) {
 
 func evaluateDiceValues(diceValues map[int]int) string {
 	// Implement logic here to evaluate dice values based on poker rules
-	// Example logic:
-	var counts = make(map[int]int)
-	for _, value := range diceValues {
-		counts[value]++
 	}
 
 	// Check for poker hands based on counts

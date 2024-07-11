@@ -144,15 +144,13 @@ func handleDiceOffSetup() {
 }
 
 func closeDice() {
-	setupMutex.Lock()
-	defer setupMutex.Unlock()
 
 	done := make(chan struct{})
 
 	for _, id := range diceIDs {
 		go func(diceID int) {
-			packet := fmt.Sprintf("%d", diceID) // Construct dice off packet
-			ext.Send(out.DICE_OFF, []byte(packet))      // Send the packet
+			packet := fmt.Sprintf("%d", diceID)    // Construct dice off packet
+			ext.Send(out.DICE_OFF, []byte(packet)) // Send the packet
 			log.Printf("Sent dice close packet for ID: %d\n", diceID)
 			done <- struct{}{}
 		}(id)
@@ -168,15 +166,13 @@ func closeDice() {
 }
 
 func rollDice() {
-	setupMutex.Lock()
-	defer setupMutex.Unlock()
 
 	done := make(chan struct{})
 
 	for _, id := range diceIDs {
 		go func(diceID int) {
-			packet := fmt.Sprintf("%d", diceID) // Construct dice roll packet
-			ext.Send(out.THROW_DICE, []byte(packet))    // Send the packet
+			packet := fmt.Sprintf("%d", diceID)      // Construct dice roll packet
+			ext.Send(out.THROW_DICE, []byte(packet)) // Send the packet
 			log.Printf("Sent dice roll packet for ID: %d\n", diceID)
 			done <- struct{}{}
 		}(id)
